@@ -1,0 +1,7 @@
+ckpt/*
+data/*
+wandb/
+
+*.txt
+*.pt
+*.pyc
