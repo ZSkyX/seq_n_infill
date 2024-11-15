@@ -44,10 +44,13 @@ class DataUtilSeq:
         print("\n---------------load mixed data------------------\n")
         if dataset_name!="test_data":
             indices = list(range(len(seq_src)))
-            random.shuffle(indices)
+            # random.shuffle(indices)
             num = 10000
-            seq_src = [seq_src[i] for i in indices[:len(seq_src)//num+1]]
-            seq_trg = [seq_trg[i] for i in indices[:len(seq_trg)//num+1]]
+            seq_src = [seq_src[i] for i in indices[:4]]
+            seq_trg = [seq_trg[i] for i in indices[:4]]
+            
+            # seq_src = [seq_src[i] for i in indices[:len(seq_src)//num+1]]
+            # seq_trg = [seq_trg[i] for i in indices[:len(seq_trg)//num+1]]
             seq_dataset = cls.process_seq_data(
                 src=seq_src,
                 trg=seq_trg,
@@ -82,7 +85,7 @@ class DataUtilSeq:
             )
         
         # Merge the datasets
-        # merged_dataset = concatenate_datasets([seq_dataset, infill_dataset])
+        # merged_dataset = concatenate_dat6asets([seq_dataset, infill_dataset])
         merged_dataset = seq_dataset
 
         if dataset_name!="test_data":
@@ -144,7 +147,7 @@ class DataUtilSeq:
             )
 
             labels = labels['input_ids']
-            labels[labels == tokenizer.pad_token_id] = -100
+            # labels[labels == tokenizer.pad_token_id] = -100
             full_input["labels"] = labels
             return full_input
             
@@ -154,7 +157,7 @@ class DataUtilSeq:
         tokenized_dataset = dataset.map(
             tokenize_function, 
             batched=True,
-            batch_size=500,
+            # batch_size=500,
             num_proc=cls.num_proc,
             remove_columns=['src', 'trg'])
 

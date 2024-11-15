@@ -1,6 +1,7 @@
 ckpt/*
 data/*
-wandb/
+wandb/*
+src/__pycache__/*
 
 *.txt
 *.pt

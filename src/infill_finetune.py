@@ -7,6 +7,8 @@ import wandb
 from transformers import logging
 import random
 import json
+from transformers import AdamW
+from torch.optim.lr_scheduler import StepLR
 import torch
 from transformers import (
     AutoModel,
@@ -122,7 +124,7 @@ class InfillFinetune():
         )
         model = T5ForConditionalGeneration(config)
         model.init_weights()
-        initialize_weights_with_xavier(model)
+        # initialize_weights_with_xavier(model)
         model = model.to('cuda')
         return model
         if model_name:
@@ -153,7 +155,7 @@ class InfillFinetune():
 
     def load_training_argument(self, **kwargs):
         train_args = Seq2SeqTrainingArguments(
-            # learning_rate = 1e-3,
+            # learning_rate = 5e-3,
             **kwargs
         )
         
@@ -205,7 +207,7 @@ class InfillFinetune():
     def compute_bleu(self, pred):
         metric = evaluate.load("bleu")
         
-        return self.process_pred_labels(metric, pred)
+        return self.process_pred_labels(metric, pred, c_type='bleu')
     
     def clean_ids(self, lbs):
         lbs_cleaned = []
@@ -226,15 +228,18 @@ class InfillFinetune():
         #decode labels        
         labels_cleaned = self.clean_ids(labels)
         decode_labels = self.tokenizer.batch_decode(labels_cleaned, skip_special_tokens=False)
+        decode_labels = [[d] for d in decode_labels]
         #compute results
-        print("pred toks", predictions[:10])
-        print("preds",decode_predictions[:10])
-        print("labels",decode_labels[:10])
+        # print("pred toks", predictions[:10])
+        # print("labels_cleaned", labels_cleaned[:10])
+        print("preds",decode_predictions[:3])
+        print("labels",decode_labels[:3])
         # exit()
         if c_type == 'rouge':
             res = metric.compute(predictions=decode_predictions, references=decode_labels, use_stemmer=True)
-        else:
+        elif c_type == 'bleu':
             res = metric.compute(predictions=decode_predictions, references=decode_labels)
+            print("bleu res",res)
         #get %
         res = {key: value * 100 for key, value in res.items()}
 
@@ -244,6 +249,15 @@ class InfillFinetune():
             return {k: round(v, 2) for k, v in res.items()}
         return res
     
+    def load_optimizer_n_scheduler(self, model):
+        # Initialize optimizer
+        optimizer = AdamW(model.parameters(), lr=5e-4)
+
+        # Learning rate scheduler (optional)
+        scheduler = StepLR(optimizer, step_size=1, gamma=0.99)
+        scheduler = None
+        return (optimizer, scheduler)
+        
     def load_training_dataset(self,):
         # Centralized method to load or reload the dataset
         return self.data_processor.process_mixed_data(
@@ -256,17 +270,16 @@ class InfillFinetune():
         )
     def load_generation_config(self):
         generation_config = GenerationConfig(
-            max_new_tokens=10,
+            max_new_tokens=100,
             min_new_tokens=1,
-            num_beams=4,
-            do_sample=True,
-            temperature=0.7,
+            num_beams=1,
+            do_sample=False,
             decoder_start_token_id=self.tokenizer.pad_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
             bos_token_id=self.tokenizer.bos_token_id if hasattr(self.tokenizer, 'bos_token_id') else None,
             length_penalty=1.0,
-            early_stopping=True
+            early_stopping=False
         )
         return generation_config
     
@@ -277,6 +290,7 @@ class InfillFinetune():
         debug_data_processor = False
         if debug_data_processor:
             wandb_mode = 'disabled'
+            
         yml = self.load_config_yaml(task_cfg_file_path)
         
         self.data_args = data_args = yml['data']
@@ -311,20 +325,13 @@ class InfillFinetune():
             # eval_src = self.load_text_data(data_args['eval_data_src'])
             # eval_trg = self.load_text_data(data_args['eval_data_trg'])
             # eval_dataset = self.data_processor.process_mixed_data(self.tokenizer, eval_src, eval_trg, None, "eval_dataset")
-            eval_dataset = self.data_processor.process_mixed_data(self.tokenizer, training_src, training_trg, None, "eval_dataset")
+            eval_dataset = training_dataset#self.data_processor.process_mixed_data(self.tokenizer, training_src, training_trg, None, "eval_dataset")
         
         # print(training_dataset)
-        # print(training_dataset['input_ids'][0])
-        # print(training_dataset['labels'][0])
-        
-        # exit()
         # print(eval_dataset)
 
             # training_dataset = self.data_processor.process_mixed_data(self.tokenizer, training_src, training_trg, cache_dir, "train_dataset")
-        generation_config = GenerationConfig(
-            max_new_tokens=10,  # Controls how many new tokens to generate
-            decoder_start_token_id=self.tokenizer.pad_token_id,
-        )
+        generation_config = self.load_generation_config()
         
         targs = self.load_training_argument(**training_args, **eval_args, generation_config=generation_config)
         if self.model_config_path is not None:
@@ -338,7 +345,7 @@ class InfillFinetune():
             
         model.resize_token_embeddings(len(self.tokenizer))
         model.generation_config = generation_config
-
+        optimizer_n_scheduler = self.load_optimizer_n_scheduler(model)
         trainer = self.load_trainer(
             model=model,
             args=targs,
@@ -346,7 +353,8 @@ class InfillFinetune():
             train_dataset=training_dataset,
             eval_dataset=eval_dataset,
             tokenizer=self.tokenizer,
-            compute_metrics=self.compute_metric
+            compute_metrics=self.compute_metric,
+            # optimizers=optimizer_n_scheduler,
         )
         
 
@@ -402,7 +410,8 @@ class InfillFinetune():
         # Set up the trainer
         args = Seq2SeqTrainingArguments(
             output_dir=test_output_dir,
-            remove_unused_columns=False,
+            remove_unused_columns=True,
+            learning_rate=5e-4,
             per_device_eval_batch_size=per_device_eval_batch_size,
             predict_with_generate=True,
             generation_num_beams=4,
