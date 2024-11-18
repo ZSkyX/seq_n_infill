@@ -80,7 +80,7 @@ class InfillFinetune():
     def __init__(self, model_name, model_config_path=None):
         self.model_name = model_name
         self.max_src = 512
-        self.max_trg = 128
+        self.max_trg = 512
         self.model_config_path = model_config_path
         self.cache_dir = None
         self.training_src = None
@@ -89,12 +89,15 @@ class InfillFinetune():
         self.trainer = None
         
     def load_tokenizer(self, model_name=None):
+        in_span_token = '<span>'
+        start_span_token = '<span/>'
         if model_name:
-            tokenizer = AutoTokenizer.from_pretrained(model_name, truncation_side='left',)
+            tokenizer = AutoTokenizer.from_pretrained(model_name, truncation_side='right',)
         else:
-            tokenizer = AutoTokenizer.from_pretrained(self.model_name, truncation_side='left',)
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name, truncation_side='right',)
         special_tokens = {
-            "additional_special_tokens": ["<span>", "</span>"] + [f"<len{i}>" for i in range(1, 6)]
+            "additional_special_tokens": [in_span_token, start_span_token] + 
+                                        [f"<len{i}>" for i in range(1, self.max_trg)]
         }
         tokenizer.add_special_tokens(special_tokens)
         tokenizer.decoder_start_token_id = 0
@@ -113,14 +116,9 @@ class InfillFinetune():
         return model
     
     def load_seq_model(self, model_name=None):
-        def initialize_weights_with_xavier(model):
-        # Apply Xavier initialization
-            for _, param in model.named_parameters():
-                if param.dim() > 1:
-                    torch.nn.init.xavier_uniform_(param)
+        
         config = T5Config(
             decoder_start_token_id = self.tokenizer.pad_token_id,
-            # num_layers = 3
         )
         model = T5ForConditionalGeneration(config)
         model.init_weights()
@@ -179,7 +177,7 @@ class InfillFinetune():
             data_collator=data_collator,
             tokenizer=tokenizer,
             compute_metrics=compute_metrics,
-            # callbacks=[AsyncDatasetCallback(self, num_prefetch=1)],
+            callbacks=[AsyncDatasetCallback(self, num_prefetch=1)],
             **kwargs
         )
         self.trainer = trainer
@@ -194,6 +192,7 @@ class InfillFinetune():
         bleu_result = self.compute_bleu(pred)
         rouge_result = self.compute_rouge(pred)
         result_dict = {**bleu_result,**rouge_result}
+        print(f"{result_dict=}")
         all_dict = {}
         for k,v in result_dict.items():
             if not isinstance(v, list):
@@ -230,23 +229,25 @@ class InfillFinetune():
         decode_labels = self.tokenizer.batch_decode(labels_cleaned, skip_special_tokens=False)
         decode_labels = [[d] for d in decode_labels]
         #compute results
-        # print("pred toks", predictions[:10])
-        # print("labels_cleaned", labels_cleaned[:10])
-        print("preds",decode_predictions[:3])
-        print("labels",decode_labels[:3])
-        # exit()
         if c_type == 'rouge':
             res = metric.compute(predictions=decode_predictions, references=decode_labels, use_stemmer=True)
         elif c_type == 'bleu':
             res = metric.compute(predictions=decode_predictions, references=decode_labels)
-            print("bleu res",res)
-        #get %
-        res = {key: value * 100 for key, value in res.items()}
+        
+        aformented_res = {}
+        for key, value in res.items():
+            if 'bleu' in key or "rouge" in key:
+                new_value = round(float(value) * 100,2)
+            else:
+                new_value = new_value
+            aformented_res[key] = new_value
+        res = aformented_res
+        # res = {key: float(value) * 100 for key, value in res.items()}
 
         pred_lens = [np.count_nonzero(pred != self.tokenizer.pad_token_id) for pred in predictions]
         res['gen_len'] = np.mean(pred_lens)
-        if c_type == 'rouge':
-            return {k: round(v, 2) for k, v in res.items()}
+        # if c_type == 'rouge':
+            # return {k: round(v, 2) for k, v in res.items()}
         return res
     
     def load_optimizer_n_scheduler(self, model):
@@ -270,9 +271,9 @@ class InfillFinetune():
         )
     def load_generation_config(self):
         generation_config = GenerationConfig(
-            max_new_tokens=100,
+            max_new_tokens=150,
             min_new_tokens=1,
-            num_beams=1,
+            num_beams=4,
             do_sample=False,
             decoder_start_token_id=self.tokenizer.pad_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
@@ -283,9 +284,9 @@ class InfillFinetune():
         )
         return generation_config
     
-    def finetune(self, task_cfg_file_path: str, resume_from_checkpoint: str|None):
+    def finetune(self, task_cfg_file_path: str, resume_from_checkpoint: str|None = None):
         wandb_mode = 'online'
-        wandb_mode = 'disabled'
+        # wandb_mode = 'disabled'
         
         debug_data_processor = False
         if debug_data_processor:
@@ -318,19 +319,14 @@ class InfillFinetune():
             training_dataset = eval_dataset = self.data_processor.process_mixed_data(self.tokenizer, debug_src, debug_trg, None, None)
            
         else:
-            self.training_src = training_src = self.load_text_data(data_args['train_data_src'])
-            self.training_trg = training_trg = self.load_text_data(data_args['train_data_trg'])
+            self.training_src = self.load_text_data(data_args['train_data_src'])
+            self.training_trg = self.load_text_data(data_args['train_data_trg'])
             training_dataset = self.load_training_dataset()
             
-            # eval_src = self.load_text_data(data_args['eval_data_src'])
-            # eval_trg = self.load_text_data(data_args['eval_data_trg'])
-            # eval_dataset = self.data_processor.process_mixed_data(self.tokenizer, eval_src, eval_trg, None, "eval_dataset")
-            eval_dataset = training_dataset#self.data_processor.process_mixed_data(self.tokenizer, training_src, training_trg, None, "eval_dataset")
-        
-        # print(training_dataset)
-        # print(eval_dataset)
+            eval_src = self.load_text_data(data_args['eval_data_src'])
+            eval_trg = self.load_text_data(data_args['eval_data_trg'])
+            eval_dataset = self.data_processor.process_mixed_data(self.tokenizer, eval_src, eval_trg, None, "eval_dataset")
 
-            # training_dataset = self.data_processor.process_mixed_data(self.tokenizer, training_src, training_trg, cache_dir, "train_dataset")
         generation_config = self.load_generation_config()
         
         targs = self.load_training_argument(**training_args, **eval_args, generation_config=generation_config)
@@ -345,7 +341,9 @@ class InfillFinetune():
             
         model.resize_token_embeddings(len(self.tokenizer))
         model.generation_config = generation_config
-        optimizer_n_scheduler = self.load_optimizer_n_scheduler(model)
+        print(len(training_dataset['input_ids']))
+        print(training_dataset)
+        # print(eval_dataset)
         trainer = self.load_trainer(
             model=model,
             args=targs,
@@ -354,7 +352,6 @@ class InfillFinetune():
             eval_dataset=eval_dataset,
             tokenizer=self.tokenizer,
             compute_metrics=self.compute_metric,
-            # optimizers=optimizer_n_scheduler,
         )
         
 
@@ -403,11 +400,7 @@ class InfillFinetune():
         tokenizer = self.tokenizer
         model.generation_config = self.load_generation_config()
         
-        # Preprocess the test data
-        # print(test_dataset['data_type'])
-        # print(test_dataset['input_ids'][0],len(test_dataset['input_ids'][0]))
-        # exit()
-        # Set up the trainer
+       
         args = Seq2SeqTrainingArguments(
             output_dir=test_output_dir,
             remove_unused_columns=True,
@@ -431,7 +424,6 @@ class InfillFinetune():
 
         # Decode the predictions
         decoded_preds = tokenizer.batch_decode(predictions.predictions, skip_special_tokens=False)
-        print(decoded_preds)
         if test_args.get('write_result', False):
             with open(test_args['write_to_file'],'w') as write_to:
                 for pred in decoded_preds:
@@ -459,8 +451,8 @@ if __name__ == "__main__":
     s2s = InfillFinetune(model_name=mn)#, model_config_path=model_related_config)
     # resume_from_checkpoint="ckpt/wmt14_en_de/seq_n_infill/checkpoint-215000"
     resume_from_checkpoint=None
-    s2s.finetune(task_cfg_file_path=task_cfg, 
-                 resume_from_checkpoint=resume_from_checkpoint)
+    s2s.finetune(task_cfg_file_path=task_cfg)
+                #  resume_from_checkpoint=resume_from_checkpoint)
     # s2s.inference(task_cfg_file_path=task_cfg)
         
         
